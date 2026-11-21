@@ -5,7 +5,7 @@
 <h1 align="center">DropShelf</h1>
 
 <p align="center">
-  轻量、开源、纯原生 macOS 拖拽中转架（Dropover 免费平替）
+  轻量、开源免费的纯原生 macOS 悬浮拖拽中转架
 </p>
 
 <p align="center">

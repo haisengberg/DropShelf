@@ -5,7 +5,7 @@
 <h1 align="center">DropShelf</h1>
 
 <p align="center">
-  A lightweight, open-source, native macOS drag-and-drop shelf (free Dropover alternative)
+  A lightweight, free & open-source, native macOS floating drag-and-drop shelf
 </p>
 
 <p align="center">
