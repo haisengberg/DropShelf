@@ -1,0 +1,22 @@
+# Build & release artifacts
+dist/
+build/
+*.app/
+*.zip
+*.dmg
+*.sha256
+*.icns
+*.iconset/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Xcode / SwiftPM
+.build/
+.swiftpm/
+*.xcuserdata
+*.xcscmblueprint
+DerivedData/
