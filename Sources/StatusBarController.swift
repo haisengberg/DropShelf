@@ -178,14 +178,14 @@ final class StatusBarController: NSObject, NSMenuDelegate {
         autoCloseToggleItem.target = self
 
         modeSystemDefaultItem = NSMenuItem(
-            title: "拖出模式：系统默认（移动/复制）",
+            title: "拖出模式：同盘移动 / 跨盘复制（默认）",
             action: #selector(selectSystemDefaultMode),
             keyEquivalent: ""
         )
         modeSystemDefaultItem.target = self
 
         modeCopyOnlyItem = NSMenuItem(
-            title: "拖出模式：仅复制（更安全）",
+            title: "拖出模式：仅复制（保留原文件）",
             action: #selector(selectCopyOnlyMode),
             keyEquivalent: ""
         )

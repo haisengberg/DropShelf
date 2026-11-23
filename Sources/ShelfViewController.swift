@@ -18,8 +18,11 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     private var autoDismissIfEmpty: Bool
     private var isMouseInside: Bool = false
     private var autoDismissTimer: Timer?
+    private var fileHealthTimer: Timer?
     private let initialAutoDismissDelay: TimeInterval = 6.0
     private let hoverExitDismissDelay: TimeInterval = 2.5
+    private let fileHealthCheckInterval: TimeInterval = 2.0
+    private let maxVNodeWatchers: Int = 64
 
     // UI elements
     private lazy var dropContainer = ShelfDropContainerView(shelfID: shelfID)
@@ -58,10 +61,11 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     private let footerView = NSView()
     private let copyAllButton = NSButton()
     private let clearButton = NSButton()
-    private let dragModeBadgeButton = NSButton()
+    private let dragModeBadgeButton = DragModeBadgeButton()
     private var copyFeedbackWorkItem: DispatchWorkItem?
 
     var hasItems: Bool { !items.isEmpty }
+    private var validItems: [ShelfItem] { items.filter { !$0.isMissing } }
 
     // Layout sizing helper
     static func preferredSize(forItemCount count: Int) -> NSSize {
@@ -93,7 +97,11 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     deinit {
         NotificationCenter.default.removeObserver(self)
         autoDismissTimer?.invalidate()
+        fileHealthTimer?.invalidate()
         copyFeedbackWorkItem?.cancel()
+        for item in items {
+            item.stopMonitoring()
+        }
     }
 
     override func loadView() {
@@ -117,6 +125,12 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
             name: Preferences.didChangeNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(appDidBecomeActive),
+            name: NSApplication.didBecomeActiveNotification,
+            object: nil
+        )
 
         if autoDismissIfEmpty {
             scheduleAutoDismiss(after: initialAutoDismissDelay)
@@ -127,7 +141,12 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
         isClosed = true
         autoDismissTimer?.invalidate()
         autoDismissTimer = nil
+        fileHealthTimer?.invalidate()
+        fileHealthTimer = nil
         copyFeedbackWorkItem?.cancel()
+        for item in items {
+            item.stopMonitoring()
+        }
         if QLPreviewPanel.sharedPreviewPanelExists() {
             let ql = QLPreviewPanel.shared()
             if ql?.isVisible == true && (ql?.dataSource as AnyObject?) === self {
@@ -160,6 +179,7 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
             self.isMouseInside = inside
             if inside {
                 self.autoDismissTimer?.invalidate()
+                self.refreshAllItemStates()
             } else {
                 self.rescheduleAutoDismissIfNeeded(delay: self.hoverExitDismissDelay)
             }
@@ -258,8 +278,11 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
 
         dragAllCard.translatesAutoresizingMaskIntoConstraints = false
         dragAllCard.itemsProvider = { [weak self] in self?.items ?? [] }
-        dragAllCard.onDragOperationEnded = { [weak self] urls, operation in
-            self?.handleDragOutEnded(draggedURLs: urls, operation: operation)
+        dragAllCard.onWillBeginDrag = { [weak self] in
+            self?.refreshAllItemStates()
+        }
+        dragAllCard.onDragOperationEnded = { [weak self] itemIDs, operation in
+            self?.handleDragOutEnded(draggedItemIDs: itemIDs, operation: operation)
         }
         populatedContainer.addSubview(dragAllCard)
 
@@ -319,11 +342,6 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
         configureFooterButton(copyAllButton, title: "复制全部", symbol: "doc.on.doc", action: #selector(copyAllClicked))
         configureFooterButton(clearButton, title: "清空", symbol: "trash", action: #selector(clearAllClicked))
 
-        dragModeBadgeButton.isBordered = false
-        dragModeBadgeButton.bezelStyle = .regularSquare
-        dragModeBadgeButton.font = NSFont.systemFont(ofSize: 10.5, weight: .medium)
-        dragModeBadgeButton.wantsLayer = true
-        dragModeBadgeButton.layer?.cornerRadius = 6
         dragModeBadgeButton.target = self
         dragModeBadgeButton.action = #selector(toggleDragModeClicked)
         dragModeBadgeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -400,16 +418,24 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     // MARK: - Items Management
 
     func addFileURLs(_ urls: [URL], animatedResize: Bool = true) {
-        let existingPaths = Set(items.map { $0.url.standardizedFileURL.path })
-        var seen = existingPaths
+        refreshAllItemStates()
+
+        var seenPaths = Set(items.map { $0.url.standardizedFileURL.path })
+        var seenRefKeys = Set(items.compactMap { $0.fileReferenceKey })
         var addedItems: [ShelfItem] = []
 
         for rawURL in urls {
             guard rawURL.isFileURL else { continue }
             let standardized = rawURL.standardizedFileURL
             guard FileManager.default.fileExists(atPath: standardized.path) else { continue }
-            guard !seen.contains(standardized.path) else { continue }
-            seen.insert(standardized.path)
+            let refKey = ShelfItem.fileReferenceKey(for: standardized)
+            if seenPaths.contains(standardized.path) { continue }
+            if let refKey = refKey, seenRefKeys.contains(refKey) { continue }
+
+            seenPaths.insert(standardized.path)
+            if let refKey = refKey {
+                seenRefKeys.insert(refKey)
+            }
 
             let item = ShelfItem(url: standardized)
             items.append(item)
@@ -423,9 +449,74 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
         autoDismissTimer?.invalidate()
         autoDismissTimer = nil
 
+        for item in addedItems {
+            startMonitoringIfAllowed(for: item)
+        }
+        updateFileHealthTimer()
+
         rebuildListUI(animatedResize: animatedResize)
         kickOffAsyncMetadata(for: addedItems)
         reloadQuickLookIfVisible()
+    }
+
+    private func startMonitoringIfAllowed(for item: ShelfItem) {
+        guard items.prefix(maxVNodeWatchers).contains(where: { $0 === item }) else { return }
+        item.startMonitoring { [weak self, weak item] in
+            guard let self = self, let item = item, !self.isClosed else { return }
+            self.handleFileSystemChange(for: item)
+        }
+    }
+
+    private func updateFileHealthTimer() {
+        if items.isEmpty || isClosed {
+            fileHealthTimer?.invalidate()
+            fileHealthTimer = nil
+            return
+        }
+        guard fileHealthTimer == nil else { return }
+        let timer = Timer(timeInterval: fileHealthCheckInterval, repeats: true) { [weak self] _ in
+            guard let self = self, !self.isClosed else { return }
+            self.refreshAllItemStates()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        fileHealthTimer = timer
+    }
+
+    private func handleFileSystemChange(for item: ShelfItem) {
+        guard item.refreshFileState() else { return }
+        if !item.isMissing && item.isImageFile && item.thumbnail == nil {
+            item.loadThumbnailIfNeeded { [weak self, weak item] image in
+                guard let self = self, let item = item, image != nil, !self.isClosed else { return }
+                self.refreshVisuals(for: item)
+            }
+        }
+        refreshVisuals(for: item)
+        reloadQuickLookIfVisible()
+    }
+
+    private func refreshAllItemStates() {
+        guard !items.isEmpty, !isClosed else { return }
+        var anyChanged = false
+
+        for item in items {
+            if item.refreshFileState() {
+                anyChanged = true
+                if !item.isMissing && item.isImageFile && item.thumbnail == nil {
+                    item.loadThumbnailIfNeeded { [weak self, weak item] image in
+                        guard let self = self, let item = item, image != nil, !self.isClosed else { return }
+                        self.refreshVisuals(for: item)
+                    }
+                }
+                if let row = rowViews.first(where: { $0.item === item }) {
+                    row.refreshVisuals()
+                }
+            }
+        }
+
+        if anyChanged {
+            dragAllCard.configure(with: items)
+            reloadQuickLookIfVisible()
+        }
     }
 
     private func kickOffAsyncMetadata(for newItems: [ShelfItem]) {
@@ -453,11 +544,15 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
         }
     }
 
-    private func removeItems(matching urls: Set<URL>, animatedResize: Bool = true) {
-        let pathsToRemove = Set(urls.map { $0.standardizedFileURL.path })
+    private func removeItems(withIDs ids: Set<UUID>, animatedResize: Bool = true) {
         let beforeCount = items.count
-        items.removeAll { pathsToRemove.contains($0.url.standardizedFileURL.path) }
+        for item in items where ids.contains(item.id) {
+            item.stopMonitoring()
+        }
+        items.removeAll { ids.contains($0.id) }
         guard items.count != beforeCount else { return }
+
+        updateFileHealthTimer()
 
         if let sel = selectedIndex {
             if items.isEmpty {
@@ -470,36 +565,30 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
         reloadQuickLookIfVisible()
     }
 
-    private func pruneMissingFiles() {
-        let before = items.count
-        items.removeAll { !FileManager.default.fileExists(atPath: $0.url.path) }
-        if items.count != before {
-            if let sel = selectedIndex, sel >= items.count {
-                selectedIndex = items.isEmpty ? nil : items.count - 1
-            }
-        }
-    }
-
-    private func handleDragOutEnded(draggedURLs: [URL], operation: NSDragOperation) {
-        // Always prune files that were moved away or deleted from disk
-        pruneMissingFiles()
+    private func handleDragOutEnded(draggedItemIDs: [UUID], operation: NSDragOperation) {
+        // Resolve current file references first so same-volume moves follow the new path
+        // and deleted/trashed files immediately show their Missing badge.
+        refreshAllItemStates()
 
         if operation != [],
            Preferences.shared.autoClearAndCloseOnDragOut,
            !isPinned {
-            let paths = Set(draggedURLs.map { $0.standardizedFileURL.path })
-            items.removeAll { paths.contains($0.url.standardizedFileURL.path) }
+            let idSet = Set(draggedItemIDs)
+            for item in items where idSet.contains(item.id) {
+                item.stopMonitoring()
+            }
+            items.removeAll { idSet.contains($0.id) }
+            updateFileHealthTimer()
             if items.isEmpty {
                 onRequestClose?()
                 return
             }
+            if let sel = selectedIndex, sel >= items.count {
+                selectedIndex = items.isEmpty ? nil : items.count - 1
+            }
+            rebuildListUI(animatedResize: true)
+            reloadQuickLookIfVisible()
         }
-
-        if let sel = selectedIndex, sel >= items.count {
-            selectedIndex = items.isEmpty ? nil : items.count - 1
-        }
-        rebuildListUI(animatedResize: true)
-        reloadQuickLookIfVisible()
     }
 
     // MARK: - UI State & Resizing
@@ -519,31 +608,45 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
             row.onSelect = { [weak self] in
                 self?.selectRow(at: index)
             }
+            row.onWillBeginDrag = { [weak self] in
+                self?.refreshAllItemStates()
+            }
             row.onQuickLook = { [weak self] in
                 self?.openQuickLook(at: index)
             }
-            row.onRevealInFinder = { [weak item] in
-                guard let url = item?.url else { return }
-                NSWorkspace.shared.activateFileViewerSelecting([url])
+            row.onRevealInFinder = { [weak self, weak item] in
+                guard let self = self, let item = item else { return }
+                self.refreshAllItemStates()
+                guard !item.isMissing else {
+                    NSSound.beep()
+                    return
+                }
+                NSWorkspace.shared.activateFileViewerSelecting([item.url])
             }
-            row.onCopyFile = { [weak item] in
-                guard let url = item?.url else { return }
+            row.onCopyFile = { [weak self, weak item] in
+                guard let self = self, let item = item else { return }
+                self.refreshAllItemStates()
+                guard !item.isMissing else {
+                    NSSound.beep()
+                    return
+                }
                 let pb = NSPasteboard.general
                 pb.clearContents()
-                pb.writeObjects([url as NSURL])
+                pb.writeObjects([item.url as NSURL])
             }
-            row.onCopyPath = { [weak item] in
-                guard let url = item?.url else { return }
+            row.onCopyPath = { [weak self, weak item] in
+                guard let self = self, let item = item else { return }
+                self.refreshAllItemStates()
                 let pb = NSPasteboard.general
                 pb.clearContents()
-                pb.setString(url.path, forType: .string)
+                pb.setString(item.url.path, forType: .string)
             }
             row.onRemove = { [weak self, weak item] in
-                guard let self = self, let url = item?.url else { return }
-                self.removeItems(matching: [url], animatedResize: true)
+                guard let self = self, let itemID = item?.id else { return }
+                self.removeItems(withIDs: [itemID], animatedResize: true)
             }
-            row.onDragOperationEnded = { [weak self] urls, op in
-                self?.handleDragOutEnded(draggedURLs: urls, operation: op)
+            row.onDragOperationEnded = { [weak self] itemIDs, op in
+                self?.handleDragOutEnded(draggedItemIDs: itemIDs, operation: op)
             }
 
             listStackView.addArrangedSubview(row)
@@ -616,7 +719,10 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
            let ql = QLPreviewPanel.shared(),
            ql.isVisible,
            (ql.dataSource as AnyObject?) === self {
-            ql.currentPreviewItemIndex = index
+            let item = items[index]
+            if let validIdx = validItems.firstIndex(where: { $0.id == item.id }) {
+                ql.currentPreviewItemIndex = validIdx
+            }
         }
     }
 
@@ -692,10 +798,15 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     }
 
     private func copyAllItemsToPasteboard() {
-        guard !items.isEmpty else { return }
+        refreshAllItemStates()
+        let available = validItems
+        guard !available.isEmpty else {
+            NSSound.beep()
+            return
+        }
         let pb = NSPasteboard.general
         pb.clearContents()
-        let urls = items.map { $0.url as NSURL }
+        let urls = available.map { $0.url as NSURL }
         pb.writeObjects(urls)
 
         // Subtle confirmation feedback
@@ -712,8 +823,12 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     }
 
     @objc private func clearAllClicked() {
+        for item in items {
+            item.stopMonitoring()
+        }
         items.removeAll()
         selectedIndex = nil
+        updateFileHealthTimer()
         rebuildListUI(animatedResize: true)
         reloadQuickLookIfVisible()
     }
@@ -724,20 +839,18 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
 
     @objc private func preferencesDidChange() {
         updateDragModeBadge()
+        dragAllCard.refreshDragModeAppearance()
+        for row in rowViews {
+            row.refreshVisuals()
+        }
+    }
+
+    @objc private func appDidBecomeActive() {
+        refreshAllItemStates()
     }
 
     private func updateDragModeBadge() {
-        let mode = Preferences.shared.dragOutMode
-        dragModeBadgeButton.title = "  \(mode.shortBadgeTitle)  "
-        dragModeBadgeButton.toolTip = mode.badgeTooltip
-
-        if mode == .copyOnly {
-            dragModeBadgeButton.contentTintColor = .controlAccentColor
-            dragModeBadgeButton.layer?.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.16).cgColor
-        } else {
-            dragModeBadgeButton.contentTintColor = .secondaryLabelColor
-            dragModeBadgeButton.layer?.backgroundColor = NSColor.labelColor.withAlphaComponent(0.08).cgColor
-        }
+        dragModeBadgeButton.apply(mode: Preferences.shared.dragOutMode)
     }
 
     // MARK: - Keyboard Handling
@@ -823,20 +936,46 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     }
 
     func toggleQuickLook() {
-        guard !items.isEmpty else { return }
+        refreshAllItemStates()
+        guard !validItems.isEmpty else {
+            NSSound.beep()
+            return
+        }
         if QLPreviewPanel.sharedPreviewPanelExists(),
            let ql = QLPreviewPanel.shared(),
            ql.isVisible {
             ql.orderOut(nil)
         } else {
-            openQuickLook(at: selectedIndex ?? 0)
+            let targetIndex: Int
+            if let sel = selectedIndex, sel < items.count, !items[sel].isMissing {
+                targetIndex = sel
+            } else if let firstValid = items.firstIndex(where: { !$0.isMissing }) {
+                targetIndex = firstValid
+            } else {
+                NSSound.beep()
+                return
+            }
+            openQuickLook(at: targetIndex)
         }
     }
 
     func openQuickLook(at index: Int) {
+        refreshAllItemStates()
         guard index >= 0 && index < items.count else { return }
+        let targetItem = items[index]
+        guard !targetItem.isMissing else {
+            NSSound.beep()
+            return
+        }
+
         selectedIndex = index
         selectRow(at: index)
+
+        let previewItems = validItems
+        guard let previewIndex = previewItems.firstIndex(where: { $0.id == targetItem.id }) else {
+            NSSound.beep()
+            return
+        }
 
         activateAppForInteraction()
         view.window?.makeKeyAndOrderFront(nil)
@@ -849,13 +988,15 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
             ql.orderFront(nil)
         }
         ql.reloadData()
-        ql.currentPreviewItemIndex = index
+        ql.currentPreviewItemIndex = previewIndex
     }
 
     func configurePreviewPanel(_ panel: QLPreviewPanel) {
-        if let idx = selectedIndex, idx < items.count {
-            panel.currentPreviewItemIndex = idx
-        } else if !items.isEmpty {
+        let previewItems = validItems
+        if let idx = selectedIndex, idx < items.count,
+           let validIdx = previewItems.firstIndex(where: { $0.id == items[idx].id }) {
+            panel.currentPreviewItemIndex = validIdx
+        } else if !previewItems.isEmpty {
             panel.currentPreviewItemIndex = 0
         }
     }
@@ -867,7 +1008,7 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
               (ql.dataSource as AnyObject?) === self else {
             return
         }
-        if items.isEmpty {
+        if validItems.isEmpty {
             ql.orderOut(nil)
         } else {
             ql.reloadData()
@@ -875,12 +1016,13 @@ final class ShelfViewController: NSViewController, QLPreviewPanelDataSource, QLP
     }
 
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        return items.count
+        return validItems.count
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
-        guard index >= 0 && index < items.count else { return nil }
-        return items[index].url as NSURL
+        let previewItems = validItems
+        guard index >= 0 && index < previewItems.count else { return nil }
+        return previewItems[index].url as NSURL
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {

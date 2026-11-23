@@ -7,18 +7,61 @@ enum DragOutMode: String, CaseIterable {
     var shortBadgeTitle: String {
         switch self {
         case .systemDefault:
-            return "默认"
+            return "移动/复制"
         case .copyOnly:
             return "仅复制"
         }
     }
 
+    var badgeSymbolName: String {
+        switch self {
+        case .systemDefault:
+            return "arrow.right.arrow.left"
+        case .copyOnly:
+            return "doc.on.doc.fill"
+        }
+    }
+
+    var dragHintText: String {
+        switch self {
+        case .systemDefault:
+            return "拖出：同盘移动 / 跨盘复制"
+        case .copyOnly:
+            return "拖出：仅复制（保留原文件）"
+        }
+    }
+
+    var hoverDragHintText: String {
+        switch self {
+        case .systemDefault:
+            return "按住拖出 · 同盘移动 / 跨盘复制"
+        case .copyOnly:
+            return "按住拖出 · 仅复制（保留原文件）"
+        }
+    }
+
+    var rowDragTooltipSummary: String {
+        switch self {
+        case .systemDefault:
+            return "拖出方式：同盘移动 / 跨盘复制（按住 ⌥ 可临时复制）"
+        case .copyOnly:
+            return "拖出方式：仅复制（不会移动原文件）"
+        }
+    }
+
+    func dragPreviewBadge(optionKeyPressed: Bool) -> (text: String, isCopyOnly: Bool) {
+        if self == .copyOnly || optionKeyPressed {
+            return ("复制", true)
+        }
+        return ("移动/复制", false)
+    }
+
     var badgeTooltip: String {
         switch self {
         case .systemDefault:
-            return "当前拖出模式：系统默认（同卷移动 / 跨卷复制）。点击切换为「仅复制」。"
+            return "当前拖出模式：同盘移动 / 跨盘复制（系统默认，拖出时按住 ⌥ 可临时强制复制）。点击切换为「仅复制」。"
         case .copyOnly:
-            return "当前拖出模式：仅复制（更安全，不移动原文件）。点击切换为「系统默认」。"
+            return "当前拖出模式：仅复制（不会移动原文件，更安全）。点击切换为「移动/复制」。"
         }
     }
 }

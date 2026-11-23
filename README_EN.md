@@ -29,11 +29,11 @@
 
 - **Shake to Open**: While dragging files, shake your cursor back and forth to summon a floating shelf right next to the pointer. Empty shake-triggered shelves auto-dismiss after ~6 seconds.
 - **Global Hotkey & Menu Bar Drop**: Press `⌥⇧D` (Option + Shift + D) anywhere to open a shelf, or drop files directly onto the menu bar icon.
-- **Reference-Only Staging**: Files are never duplicated or modified when staged; native move/copy happens only when you drag them out.
+- **Live File-Reference Tracking & Missing Badge**: Staging stores native macOS file references (inode-backed) with zero disk bloat—renaming or moving a file on the same volume updates automatically in place, while deleted or trashed files display a clear **Missing** badge instead of silently breaking.
 - **Drag All or Single Item**:
-  - Drag the stacked card at the top to drag **all** staged files together.
+  - Drag the stacked card at the top to drag **all** available staged files together.
   - Drag any individual row to drag just that file.
-- **Switchable Drag-Out Mode**: Toggle between `System Default (Move/Copy)` and `Copy Only (Safer)` from the menu bar or the shelf footer badge.
+- **Explicit Move/Copy vs. Copy Only Indicators**: The stack card, footer toggle badge, tooltips, and drag preview explicitly show whether dragging out will **Move/Copy** (same-volume move / cross-volume copy, hold `⌥` to copy) or **Copy Only** (never moves originals). Toggle with one click in the footer or menu bar.
 - **Always-on-Top & Cross-Space**: Floating non-activating panels stay visible across windows, Spaces, and full-screen apps, with multiple shelves supported simultaneously.
 - **Pin & Auto-Close**: Pin any shelf to keep it open; unpinned shelves optionally clear and close automatically after dragging files out.
 - **Quick Look & Actions**: Preview files with `Space`, double-click, or the eye button; copy all files (`⌘C`); right-click to reveal in Finder, copy file/path, or remove.
